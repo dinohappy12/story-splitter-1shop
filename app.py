@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
@@ -16,8 +16,9 @@ STATIC_DIR = BASE_DIR / "static"
 WORK_DIR.mkdir(exist_ok=True)
 STATIC_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="分鏡切圖工具", version="1.1.0")
+app = FastAPI(title="分鏡切圖工具", version="2.0.0")
 
+# ✅ CORS（給1shop用）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,53 +29,64 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-
+# ========================
+# 共用：切圖打包
+# ========================
 def make_zip_from_crops(image, boxes, job_dir: Path):
     output_dir = job_dir / "output"
     output_dir.mkdir(exist_ok=True)
     h_img, w_img = image.shape[:2]
 
     for idx, b in enumerate(boxes, start=1):
-        x = max(0, int(round(float(b["x"]))))
-        y = max(0, int(round(float(b["y"]))))
-        w = max(1, int(round(float(b["w"]))))
-        h = max(1, int(round(float(b["h"]))))
+        x = max(0, int(b["x"]))
+        y = max(0, int(b["y"]))
+        w = max(1, int(b["w"]))
+        h = max(1, int(b["h"]))
+
         x2 = min(w_img, x + w)
         y2 = min(h_img, y + h)
+
         if x >= w_img or y >= h_img or x2 <= x or y2 <= y:
             continue
+
         crop = image[y:y2, x:x2]
         cv2.imwrite(str(output_dir / f"scene_{idx:02d}.png"), crop)
 
     if not any(output_dir.iterdir()):
-        raise HTTPException(status_code=422, detail="框線範圍無法切出圖片，請重新調整框線")
+        raise HTTPException(status_code=422, detail="切圖失敗，請檢查框線")
 
-    zip_path = job_dir / "story_panels.zip"
+    zip_path = job_dir / "result.zip"
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for item in sorted(output_dir.iterdir()):
-            zipf.write(item, arcname=item.name)
+        for item in output_dir.iterdir():
+            zipf.write(item, item.name)
+
     return zip_path
 
 
+# ========================
+# 首頁（可有可無）
+# ========================
 @app.get("/", response_class=HTMLResponse)
 def home():
-    index_path = STATIC_DIR / "index.html"
-    if index_path.exists():
-        return index_path.read_text(encoding="utf-8")
-    return "<h1>分鏡切圖 API 已啟動</h1>"
+    return "<h2>分鏡切圖 API 已啟動</h2>"
 
 
+# ========================
+# 手動框切圖
+# ========================
 @app.post("/split_with_boxes")
-async def split_with_boxes(file: UploadFile = File(...), boxes: str = Form(...)):
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="請上傳 JPG 或 PNG 圖片")
+async def split_with_boxes(
+    file: UploadFile = File(...),
+    boxes: str = Form(...)
+):
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="請上傳圖片")
 
     try:
         parsed_boxes = json.loads(boxes)
-        if not isinstance(parsed_boxes, list) or len(parsed_boxes) == 0:
-            raise ValueError("boxes must be a non-empty list")
-    except Exception:
-        raise HTTPException(status_code=400, detail="框線資料格式錯誤")
+    except:
+        raise HTTPException(status_code=400, detail="框線格式錯誤")
 
     job_id = uuid.uuid4().hex
     job_dir = WORK_DIR / job_id
@@ -83,42 +95,48 @@ async def split_with_boxes(file: UploadFile = File(...), boxes: str = Form(...))
     content = await file.read()
     npimg = np.frombuffer(content, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+
     if image is None:
-        raise HTTPException(status_code=400, detail="圖片讀取失敗，請換一張圖試試")
+        raise HTTPException(status_code=400, detail="圖片讀取失敗")
 
     zip_path = make_zip_from_crops(image, parsed_boxes, job_dir)
+
     return FileResponse(
-        path=str(zip_path),
-        filename="story_panels.zip",
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=story_panels.zip"},
+        str(zip_path),
+        filename="result.zip",
+        media_type="application/zip"
     )
+
+
+# ========================
+# 九宮格自動切圖（🔥你現在主力用這個）
+# ========================
 @app.post("/auto_grid")
-async def auto_grid(file: UploadFile):
+async def auto_grid(file: UploadFile = File(...)):
     content = await file.read()
     npimg = np.frombuffer(content, np.uint8)
     image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+
+    if image is None:
+        raise HTTPException(status_code=400, detail="圖片讀取失敗")
 
     h, w = image.shape[:2]
 
     rows = 3
     cols = 3
 
-    boxes = []
-
     cell_w = w // cols
     cell_h = h // rows
 
+    boxes = []
+
     for r in range(rows):
         for c in range(cols):
-            x = c * cell_w
-            y = r * cell_h
-
             boxes.append({
-                "x": x,
-                "y": y,
+                "x": c * cell_w,
+                "y": r * cell_h,
                 "w": cell_w,
                 "h": cell_h
             })
 
-    return {"boxes": boxes}
+    return JSONResponse({"boxes": boxes})
