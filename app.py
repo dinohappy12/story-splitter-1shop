@@ -93,3 +93,32 @@ async def split_with_boxes(file: UploadFile = File(...), boxes: str = Form(...))
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=story_panels.zip"},
     )
+@app.post("/auto_grid")
+async def auto_grid(file: UploadFile):
+    content = await file.read()
+    npimg = np.frombuffer(content, np.uint8)
+    image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+
+    h, w = image.shape[:2]
+
+    rows = 3
+    cols = 3
+
+    boxes = []
+
+    cell_w = w // cols
+    cell_h = h // rows
+
+    for r in range(rows):
+        for c in range(cols):
+            x = c * cell_w
+            y = r * cell_h
+
+            boxes.append({
+                "x": x,
+                "y": y,
+                "w": cell_w,
+                "h": cell_h
+            })
+
+    return {"boxes": boxes}
